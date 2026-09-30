@@ -1,6 +1,6 @@
 {
   "name": "matterbridge-plugin-nolongerevil-thermostat",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Matterbridge plugin that bridges No Longer Evil self-hosted Nest thermostats to Matter, with live SSE-driven updates.",
   "author": "https://github.com/eu-evops",
   "homepage": "https://github.com/eu-evops/matterbridge-plugin-nolongerevil-thermostat#readme",
@@ -61,7 +61,7 @@
     "*.schema.json"
   ],
   "scripts": {
-    "start": "matterbridge",
+    "start": "matterbridge --loger:debug --homedir $PWD",
     "build": "tsc --project tsconfig.build.json",
     "buildProduction": "tsc --project tsconfig.build.production.json",
     "clean": "npx shx rm -rf *.tsbuildinfo dist",

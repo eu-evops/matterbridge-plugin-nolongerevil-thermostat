@@ -24,16 +24,40 @@ export interface NleStatus {
   serial: string;
   name?: string | null;
   is_available?: boolean;
+  last_seen?: string;
   is_online?: boolean;
   current_temperature: number | null;
   target_temperature: number | null;
   target_temperature_high: number | null;
   target_temperature_low: number | null;
   mode: NleMode | null;
-  can_heat?: boolean;
-  can_cool?: boolean;
-  has_fan?: boolean;
-  away?: boolean;
+  has_leaf: boolean;
+  humidity: number;
+  target_humidity: number;
+  target_humidity_enabled: boolean;
+  eco_temperatures?: {
+    high: number;
+    low: number;
+  };
+  software_version: string;
+  temperature_scale: 'C' | 'F"';
+  eco_mode?: 'schedule';
+  time_to_target: number;
+  time_to_target_training_status: unknown;
+  learning_mode: boolean;
+  preconditioning_enabled: boolean;
+  backplate_temperature: number;
+  away?: false;
+  schedule_mode: null;
+
+  capabilities?: {
+    can_heat: boolean;
+    can_cool: boolean;
+    has_fan: boolean;
+    has_emer_heat: boolean;
+    has_humidifier: boolean;
+    has_dehumidifier: boolean;
+  };
 }
 
 /** Matter Thermostat cluster SystemMode enum values (matter.js). */

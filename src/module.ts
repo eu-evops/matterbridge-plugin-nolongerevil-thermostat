@@ -12,7 +12,7 @@
  * @license Apache-2.0
  */
 
-import { bridgedNode, MatterbridgeDynamicPlatform, MatterbridgeEndpoint, onOffOutlet, PlatformConfig, PlatformMatterbridge, thermostatDevice } from 'matterbridge';
+import { bridgedNode, humiditySensor, MatterbridgeDynamicPlatform, MatterbridgeEndpoint, onOffPlugInUnit, PlatformConfig, PlatformMatterbridge, thermostat } from 'matterbridge';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
 
 import {
@@ -182,6 +182,7 @@ export class NoLongerEvilThermostatPlatform extends MatterbridgeDynamicPlatform 
 
       let binding: ThermostatBinding;
       try {
+        this.log.info(`Serial:${device.serial} displayName:${displayName} status:${JSON.stringify(status, null, 2)}`);
         binding = this.createBinding(device.serial, displayName, status);
       } catch (error) {
         this.log.error(`Failed to build endpoints for ${displayName} (${device.serial}): ${(error as Error).message}`);
@@ -197,6 +198,8 @@ export class NoLongerEvilThermostatPlatform extends MatterbridgeDynamicPlatform 
         this.bindings.delete(device.serial);
       }
     }
+
+    this.log.debug(`Finished registering devices.`);
   }
 
   /**
@@ -212,19 +215,34 @@ export class NoLongerEvilThermostatPlatform extends MatterbridgeDynamicPlatform 
     const localTempC = Number.isFinite(status.current_temperature ?? NaN) ? (status.current_temperature as number) : setpoints.heat;
 
     // Note: createDefaultThermostatClusterServer expects raw degrees Celsius — it multiplies by 100 internally.
-    const thermostat = new MatterbridgeEndpoint([thermostatDevice, bridgedNode], { id: `nle-thermo-${serial}` }, Boolean(this.config.debug))
+    const device = new MatterbridgeEndpoint([thermostat, bridgedNode], { id: `nle-thermo-${serial}` }, Boolean(this.config.debug))
       .createDefaultIdentifyClusterServer()
-      .createDefaultBridgedDeviceBasicInformationClusterServer(displayName, serial, VENDOR_ID, VENDOR_NAME, PRODUCT_NAME)
-      .createDefaultThermostatClusterServer(localTempC, setpoints.heat, setpoints.cool, 0.5, NLE_MIN_C, NLE_MAX_C, NLE_MIN_C, NLE_MAX_C)
-      .addRequiredClusterServers();
+      .createDefaultBridgedDeviceBasicInformationClusterServer(displayName, serial, VENDOR_ID, VENDOR_NAME, PRODUCT_NAME);
 
-    const away = new MatterbridgeEndpoint([onOffOutlet, bridgedNode], { id: `nle-away-${serial}` }, Boolean(this.config.debug))
+    const canHeat = status.capabilities?.can_heat ?? false;
+    const canCool = status.capabilities?.can_cool ?? false;
+
+    if (canHeat && canCool) {
+      device.createDefaultThermostatClusterServer(localTempC, setpoints.heat, setpoints.cool, 0.5, NLE_MIN_C, NLE_MAX_C, NLE_MIN_C, NLE_MAX_C);
+    } else if (canHeat) {
+      device.createDefaultHeatingThermostatClusterServer(localTempC, setpoints.heat, NLE_MIN_C, NLE_MAX_C);
+    } else {
+      device.createDefaultCoolingThermostatClusterServer(localTempC, setpoints.cool, NLE_MIN_C, NLE_MAX_C);
+    }
+
+    const away = new MatterbridgeEndpoint([onOffPlugInUnit, bridgedNode], { id: `nle-away-${serial}` }, Boolean(this.config.debug))
       .createDefaultIdentifyClusterServer()
       .createDefaultBridgedDeviceBasicInformationClusterServer(`${displayName} Away`, `${serial}-away`, VENDOR_ID, VENDOR_NAME, `${PRODUCT_NAME} (Away)`)
       .createDefaultOnOffClusterServer(Boolean(status.away))
       .addRequiredClusterServers();
 
-    const binding: ThermostatBinding = { serial, thermostat, away, syncing: false, currentMode: status.mode };
+    const binding: ThermostatBinding = {
+      serial,
+      thermostat: device,
+      away,
+      syncing: false,
+      currentMode: status.mode,
+    };
 
     away.addCommandHandler('on', () => {
       void this.handleAwayCommand(binding, true);
@@ -233,15 +251,24 @@ export class NoLongerEvilThermostatPlatform extends MatterbridgeDynamicPlatform 
       void this.handleAwayCommand(binding, false);
     });
 
-    void thermostat.subscribeAttribute('Thermostat', 'systemMode', (newValue) => {
+    void device.subscribeAttribute('Thermostat', 'systemMode', (newValue) => {
       void this.handleSystemModeWrite(binding, Number(newValue));
     });
-    void thermostat.subscribeAttribute('Thermostat', 'occupiedHeatingSetpoint', (newValue) => {
-      void this.handleSetpointWrite(binding, 'heat', Number(newValue));
-    });
-    void thermostat.subscribeAttribute('Thermostat', 'occupiedCoolingSetpoint', (newValue) => {
-      void this.handleSetpointWrite(binding, 'cool', Number(newValue));
-    });
+
+    if (status.capabilities?.can_heat) {
+      device.subscribeAttribute('Thermostat', 'occupiedHeatingSetpoint', (newValue) => {
+        void this.handleSetpointWrite(binding, 'heat', Number(newValue));
+      });
+    }
+
+    if (status.capabilities?.can_cool) {
+      device.subscribeAttribute('Thermostat', 'occupiedCoolingSetpoint', (newValue) => {
+        void this.handleSetpointWrite(binding, 'cool', Number(newValue));
+      });
+    }
+
+    device.addChildDeviceType('HumiditySensor', humiditySensor).createDefaultRelativeHumidityMeasurementClusterServer(status.humidity * 100);
+    device.addRequiredClusterServers();
 
     return binding;
   }
@@ -260,12 +287,25 @@ export class NoLongerEvilThermostatPlatform extends MatterbridgeDynamicPlatform 
       const setpoints = extractSetpoints(status);
       const localTemp = cToMatter(status.current_temperature);
       if (localTemp !== null) await binding.thermostat.updateAttribute('Thermostat', 'localTemperature', localTemp);
-      const heat = cToMatter(setpoints.heat);
-      if (heat !== null) await binding.thermostat.updateAttribute('Thermostat', 'occupiedHeatingSetpoint', heat);
-      const cool = cToMatter(setpoints.cool);
-      if (cool !== null) await binding.thermostat.updateAttribute('Thermostat', 'occupiedCoolingSetpoint', cool);
+
+      if (status.capabilities?.can_heat) {
+        const heat = cToMatter(setpoints.heat);
+        if (heat !== null) await binding.thermostat.updateAttribute('Thermostat', 'occupiedHeatingSetpoint', heat);
+      }
+
+      if (status.capabilities?.can_cool) {
+        const cool = cToMatter(setpoints.cool);
+        if (cool !== null) await binding.thermostat.updateAttribute('Thermostat', 'occupiedCoolingSetpoint', cool);
+      }
+
+      // FIX: Target RelativeHumidityMeasurement cluster & multiply value by 100
+      if (Number.isFinite(status.humidity)) {
+        const matterHumidity = status.humidity * 100;
+        await binding.thermostat.getChildEndpoints()?.[0].updateAttribute('RelativeHumidityMeasurement', 'measuredValue', matterHumidity);
+      }
+
       await binding.thermostat.updateAttribute('Thermostat', 'systemMode', nleModeToSystemMode(status.mode));
-      await binding.thermostat.updateAttribute('Thermostat', 'controlSequenceOfOperation', controlSequenceFor(status.can_heat, status.can_cool));
+      await binding.thermostat.updateAttribute('Thermostat', 'controlSequenceOfOperation', controlSequenceFor(status.capabilities?.can_heat, status.capabilities?.can_cool));
       await binding.away.updateAttribute('OnOff', 'onOff', Boolean(status.away));
     } finally {
       binding.syncing = false;
@@ -355,7 +395,7 @@ export class NoLongerEvilThermostatPlatform extends MatterbridgeDynamicPlatform 
    * matches a registered binding.
    */
   private startSseSubscription(): void {
-    if (this.bindings.size === 0) return;
+    this.log.debug(`Configuring Sse subscription for ${this.bindings.size} devices`);
     const apiUrl = this.getApiUrl();
     this.sseAbort = new AbortController();
     void subscribeEvents(apiUrl, this.sseAbort.signal, {
